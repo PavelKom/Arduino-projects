@@ -9,44 +9,75 @@
                             Если нужны другие буквы, то можно использовать char_draw_ui.py (требуется Python) для рисовки своих символов.
                             Примечание: LCDI2C_Multilingual хранит в своей памяти до 8 кастомных символов, если надо больше, то ищите CGRAM_SIZE и cgramLetters[CGRAM_SIZE]
 */
-// Библиотеки
 #include <Arduino.h>
-// Реле
-#include <Relay.h>
-// Расходомер
-#include <FlowSensor.h>
-// Часы
-#include <RtcDS1302.h>
-// Дисплей. Если у вас за место некоторых 
-// букв отображаются буквы других языков, к примеру, японские, то используйте кастомный рус-яз
-//#include <LCDI2C_Multilingual.h>
-#include "rusLCD_Custom.h"
 
+// Настройки
+//#define DEBUG // Включение Serial для связи с ПК
 // Реле
-// 3 пина, 1 управляющий. 5V, SIGNAL (OUTPUT), GND
-Relay pump(13, true);
+#define RELAY_PIN 13          // Пин для реле
+#define RELAY_NO true         // Нормально открыто?
 // Расходомер
-// 3 пина, 1 управляющий. 5V, SIGNAL (INPUT с ШИМ), GND
-#define FLOW_WORK 100 // Литр/час
-FlowSensor flow(YFS201, 3);
-// Часы DS1302
-// 5 пинов, 3 управляющих. 5V, GND, CLK (PWN), DAT, RST
-ThreeWire myWire(4,5,2); // DAT/IO, CLK/SCLK, RST/CE
-RtcDS1302<ThreeWire> rtc(myWire);
-int32_t idle_timer = RtcDateTime(0,0,1,1,0,0).TotalSeconds(); //1 hour
-int32_t warm_timer = RtcDateTime(0,0,1,0,1,0).TotalSeconds(); //1 min
-int32_t job_timer = RtcDateTime(0,0,1,0,5,0).TotalSeconds(); //5 min
-int32_t test_timer = RtcDateTime(0,0,1,0,0,5).TotalSeconds(); //5 sec
-// Дисплей по I2C (A4,A5)
-LCDI2C_CustomRus lcd(0x27, 16, 2);
+#define FLOW_WORK 100         // Литр/час (int)
+#define FLOW_PIN 3            // Пин для расходомера (ШИМ)
+#define FLOW_TYPE YFS201      // Тип расходомера
+// Часы. DS1307 работают через A4() и A5() 
+#define CLOCK_TYPE 1302       // 1302 1307
+#define PIN_1302_DAT_IO 4     // DAT/IO пин
+#define PIN_1302_CLK_SCLK 5   // CLK/SCLK пин
+#define PIN_1302_RST_CE 2     // RST/CE пин
+// Дисплей
+#define LCD_FIX_CYRILLIC true // ИСТИНА если дисплей неправильно работает с кириллицей
+#define LCD_ADDRESS 0x27      // Адрес дисплея
+#define LCD_COLUMNS 16        // Количество столбцов
+#define LCD_ROWS 2            // Количество строк
+// Сообщения статуса, строки одинаковой длины
 const static char* Status[] ={"ПРОГРЕВ ", "РАБОТА  ", "ПРОГРЕВ?", "РАБОТА? ", "ОЖИДАНИЕ", "ПРОВЕРКА"};
+// Время. RtcDateTime(Год,Месяц,День,Час,Минута,Секунда), день должен быть больше нуля
+#define TIME_IDLE RtcDateTime(0,0,1,1,0,0) // Время ожидания между прогревом (1 час)
+#define TIME_WARM RtcDateTime(0,0,1,0,1,0) // Время прогрева (1 минута)
+#define TIME_JOB  RtcDateTime(0,0,1,0,5,0) // Время работы (5 минут)
+#define TIME_TEST RtcDateTime(0,0,1,0,0,5) // Время для набора потока (5 секунд)
+
+// Библиотеки
+#include <Relay.h>
+#include <FlowSensor.h>
+#if CLOCK_TYPE == 1302
+  #include <RtcDS1302.h>
+#elif CLOCK_TYPE == 1307
+  #include <Wire.h>
+  #include <RtcDS1307.h>
+#endif
+#if LCD_FIX_CYRILLIC
+  #include "rusLCD_Custom.h"
+#else
+  #include <LCDI2C_Multilingual.h>
+#endif
+
+// Анстройка времени. 
+int32_t idle_timer = TIME_IDLE.TotalSeconds();
+int32_t warm_timer = TIME_WARM.TotalSeconds();
+int32_t job_timer =  TIME_JOB.TotalSeconds();
+int32_t test_timer = TIME_TEST.TotalSeconds();
+
+// Классы
+Relay pump(RELAY_PIN, RELAY_NO);
+FlowSensor flow(FLOW_TYPE, FLOW_PIN);
+#if CLOCK_TYPE == 1302
+  ThreeWire myWire(PIN_1302_DAT_IO, PIN_1302_CLK_SCLK, PIN_1302_RST_CE);
+  RtcDS1302<ThreeWire> rtc(myWire);
+#elif CLOCK_TYPE == 1307
+  RtcDS1307<TwoWire> rtc(Wire);
+#endif
+#if LCD_FIX_CYRILLIC
+  LCDI2C_CustomRus lcd(LCD_ADDRESS, LCD_COLUMNS, LCD_ROWS);
+#else
+  LCDI2C_Russian lcd(LCD_ADDRESS, LCD_COLUMNS, LCD_ROWS);
+#endif
 
 RtcDateTime now;
 RtcDateTime nextChange;
 uint8_t status;
 int flowH;
-
-//#define DEBUG
 
 void set_warm(){
   status = 0;
