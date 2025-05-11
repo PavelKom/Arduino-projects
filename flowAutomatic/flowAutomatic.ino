@@ -14,12 +14,13 @@
 // Настройки
 //#define DEBUG // Включение Serial для связи с ПК
 // Реле
-#define RELAY_PIN 13          // Пин для реле
+#define RELAY_PIN 12          // Пин для реле
 #define RELAY_NO true         // Нормально открыто?
 // Расходомер
 #define FLOW_WORK 100         // Литр/час (int)
 #define FLOW_PIN 3            // Пин для расходомера (ШИМ)
 #define FLOW_TYPE YFS201      // Тип расходомера
+#define FLOW_DEBUG_PIN 9      // Пин для симуляции расходомера (ШИМ)
 // Часы. DS1307 работают через A4() и A5() 
 #define CLOCK_TYPE 1302       // 1302 1307
 #define PIN_1302_DAT_IO 4     // DAT/IO пин
@@ -33,13 +34,14 @@
 // Сообщения статуса, строки одинаковой длины
 const static char* Status[] ={"ПРОГРЕВ ", "РАБОТА  ", "ПРОГРЕВ?", "РАБОТА? ", "ОЖИДАНИЕ", "ПРОВЕРКА"};
 // Время. RtcDateTime(Год,Месяц,День,Час,Минута,Секунда), день должен быть больше нуля
-#define TIME_IDLE RtcDateTime(0,0,1,1,0,0) // Время ожидания между прогревом (1 час)
-#define TIME_WARM RtcDateTime(0,0,1,0,1,0) // Время прогрева (1 минута)
-#define TIME_JOB  RtcDateTime(0,0,1,0,5,0) // Время работы (5 минут)
+#define TIME_IDLE RtcDateTime(0,0,1,0,30,0) // Время ожидания между прогревом (30 минут)
+#define TIME_WARM RtcDateTime(0,0,1,0,2,0) // Время прогрева (2 минуты)
+#define TIME_JOB  RtcDateTime(0,0,1,0,1,0) // Время работы (5 минут)
 #define TIME_TEST RtcDateTime(0,0,1,0,0,5) // Время для набора потока (5 секунд)
+// Настройка времени неактивности прогрева ниже
 
 // Библиотеки
-#include <Relay.h>
+#include "relay.h"
 #include <FlowSensor.h>
 #if CLOCK_TYPE == 1302
   #include <RtcDS1302.h>
@@ -47,17 +49,23 @@ const static char* Status[] ={"ПРОГРЕВ ", "РАБОТА  ", "ПРОГРЕ
   #include <Wire.h>
   #include <RtcDS1307.h>
 #endif
+#include "sleepTime.h"
 #if LCD_FIX_CYRILLIC
   #include "rusLCD_Custom.h"
 #else
   #include <LCDI2C_Multilingual.h>
 #endif
 
-// Анстройка времени. 
+// Настройка времени. 
 int32_t idle_timer = TIME_IDLE.TotalSeconds();
 int32_t warm_timer = TIME_WARM.TotalSeconds();
 int32_t job_timer =  TIME_JOB.TotalSeconds();
 int32_t test_timer = TIME_TEST.TotalSeconds();
+SleepTime sleeps[] = {
+  //SleepTime(7, 30, 17, 0), // 7:30:00 - 17:00:00
+  SleepTime(22, 5) // 22:00:00 - 05:00:00
+};
+uint8_t sleep_len = sizeof(sleeps) > 0 ? sizeof(sleeps) / sizeof(sleeps[0]) : 0;
 
 // Классы
 Relay pump(RELAY_PIN, RELAY_NO);
@@ -76,45 +84,49 @@ FlowSensor flow(FLOW_TYPE, FLOW_PIN);
 
 RtcDateTime now;
 RtcDateTime nextChange;
-uint8_t status;
+uint8_t status = 4;
 int flowH;
 
 void set_warm(){
   status = 0;
   nextChange = now + warm_timer;
-  lcd.clear();
 }
 void set_job(){
   status = 1;
   nextChange = now + job_timer;
-  lcd.clear();
 }
 void set_warm_pre(){
+  for (uint8_t i=0; i < sleep_len; i++){
+    if (sleeps[i].isInsideEx(now, nextChange))
+    {
+#ifdef DEBUG
+      Serial.println(i);
+#endif
+      return;
+    }
+  }
+  
   status = 2;
-  pump.turnOn();
+  pump.on();
   lcd.backlight();
   nextChange = now + test_timer;
-  lcd.clear();
 }
 void set_job_pre(){
   status = 3;
-  pump.turnOn();
+  pump.on();
   lcd.backlight();
   nextChange = now + test_timer;
-  lcd.clear();
 }
 void set_idle(){
   status = 4;
-  pump.turnOff();
+  pump.off();
   lcd.noBacklight();
   nextChange = now + idle_timer;
-  lcd.clear();
 }
 void set_test(){
   status = 5;
-  pump.turnOff();
+  pump.off();
   nextChange = now + test_timer;
-  lcd.clear();
 }
 void test_flow(){
   if (flowH >= FLOW_WORK)
@@ -125,12 +137,17 @@ void test_flow(){
 void test_time(){
   if (now < nextChange)
   {
-    if (status == 4 && flowH >= FLOW_WORK) // Открыли кран
+    if (status == 4 && flowH >= FLOW_WORK){ // Открыли кран
       set_job_pre();
-    else if(status < 2 && flowH < FLOW_WORK) // Нет воды
+      lcd.clear();
+      }
+    else if(status < 2 && flowH < FLOW_WORK){ // Нет воды
       test_flow();
+      lcd.clear();
+    }
     return;
   }
+  lcd.clear();
   switch (status)
   {
     case 0: // Конец прогрева,
@@ -162,43 +179,101 @@ void count()
 void setup() {
 #ifdef DEBUG
   Serial.begin(57600);
+  pinMode(FLOW_DEBUG_PIN, OUTPUT);
 #endif
   lcd.init();
   lcd.backlight();
+  pump.begin();
   flow.begin(count);
   RtcDateTime compiled = RtcDateTime(__DATE__, __TIME__);
   now = rtc.GetDateTime();
   if (compiled > now)
     rtc.SetDateTime(compiled);
   set_warm_pre();
+  printTime(now);
 }
 
 
 char buffer[32];
 void loop() {
   flow.read();
-  lcd.home();
   now = rtc.GetDateTime();
   flowH = int(flow.getFlowRate_h());
+#ifdef DEBUG
+  flowSim();
+#endif
   test_time();
 
-  //HH:MM:SS---MM:SS
+  //HH:MM---HH:MM:SS
   //STATUS++-----Flo
   RtcDateTime wait = nextChange - now.TotalSeconds();
 #ifdef DEBUG
   Serial.print(status);
   Serial.print("  ");
-  Serial.print(now.TotalSeconds());
+  printDateTime(now);
   Serial.print("  ");
-  Serial.print(nextChange.TotalSeconds());
+  printDateTime(nextChange);
   Serial.print("  ");
-  Serial.println(wait.TotalSeconds());
+  printDateTime(wait);
+  Serial.println("");
 #endif
-  sprintf(buffer, "%.2i:%.2i:%.2i   %.2i:%.2i",
-    now.Hour(), now.Minute(), now.Second(),
-    wait.Minute(), wait.Second()); // Get time
-  lcd.println(buffer);
-  sprintf(buffer, "%s     %.3i", Status[status], flowH);
-  lcd.println(buffer);
+  printTime(wait);
   delay(1000);
 }
+
+inline void printTime(const RtcDateTime& wait)
+{
+  lcd.home();
+  sprintf(buffer, "%.2i:%.2i   %.2i:%.2i:%.2i",
+    now.Hour(), now.Minute(),
+    wait.Hour(), wait.Minute(), wait.Second()); // Get time
+  lcd.println(buffer);
+  //lcd.print();
+  sprintf(buffer, "%s     %.3i", Status[status], flowH);
+  lcd.println(buffer);
+}
+
+#ifdef DEBUG
+// From Rtc_by_Makuna/examples/DS1302_Memory/DS1302_Memory.ino
+void printDateTime(const RtcDateTime& dt)
+{
+    char datestring[26];
+
+    snprintf_P(datestring, 
+            countof(datestring),
+            PSTR("%02u/%02u/%04u %02u:%02u:%02u"),
+            dt.Day(),
+            dt.Month(),
+            dt.Year(),
+            dt.Hour(),
+            dt.Minute(),
+            dt.Second() );
+    Serial.print(datestring);
+}
+uint8_t pwn_val = 0;
+uint8_t dbg_iter;
+void flowSim()
+{
+  if (pwn_val == 0){
+    do{
+      pwn_val++;
+      analogWrite(FLOW_DEBUG_PIN, pwn_val);
+      flow.read();
+      flowH = int(flow.getFlowRate_h());
+      Serial.print(pwn_val);
+      Serial.print(" ");
+      Serial.println(flowH);
+      delay(1000); 
+    }while(pwn_val < 255 && flowH < FLOW_WORK);
+  }
+  if (dbg_iter == 0){
+    if (flowH < FLOW_WORK)
+      analogWrite(FLOW_DEBUG_PIN, pwn_val);
+    else
+      analogWrite(FLOW_DEBUG_PIN, 0);
+    dbg_iter = 10;
+  }
+  else
+    dbg_iter--;
+}
+#endif
