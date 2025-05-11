@@ -148,6 +148,7 @@ void test_time(){
     return;
   }
   lcd.clear();
+  lcd.blink_off();
   switch (status)
   {
     case 0: // Конец прогрева,
